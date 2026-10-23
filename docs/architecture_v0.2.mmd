@@ -1,0 +1,22 @@
+flowchart LR
+    subgraph sources["Sources (HTTPS)"]
+        F["flights.json<br/>GitHub"]
+        A["airports.csv<br/>OurAirports"]
+    end
+    subgraph compose["docker compose up"]
+        subgraph af["Airflow container (standalone)"]
+            E["extract"] --> V["validate"] --> L["load_raw"]
+            L --> S["build_staging"] --> M["build_mart"] --> Q["quality_checks"]
+        end
+        LZ[("landing volume<br/>one folder per run date")]
+        subgraph pg["PostgreSQL 16"]
+            R[("raw")] --> ST[("staging")] --> MA[("mart<br/>star schema")]
+            AM[("airflow<br/>metadata DB")]
+        end
+    end
+    F --> E
+    A --> E
+    E -.-> LZ
+    L --> R
+    MA --> C["SQL clients<br/>notebooks"]
+    MA -. "final (W13)" .-> BQ["GCS + BigQuery<br/>via Terraform"]
