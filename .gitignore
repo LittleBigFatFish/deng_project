@@ -1,0 +1,22 @@
+# secrets
+.env
+
+# downloaded source files (never commit data)
+data/
+landing/
+*.json.gz
+
+# python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# airflow runtime
+logs/
+
+# editors / OS
+.DS_Store
+.idea/
+.vscode/
+docker-compose.override.yml

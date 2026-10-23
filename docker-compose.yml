@@ -1,0 +1,87 @@
+# Local stack for the midterm: PostgreSQL + Airflow on one shared Docker network.
+# Start with:  docker compose up -d
+name: deng
+
+x-airflow-common: &airflow-common
+  image: apache/airflow:2.10.5-python3.11
+  environment: &airflow-env
+    # where our pipeline writes its data (warehouse database)
+    DENG_DB_HOST: postgres
+    DENG_DB_PORT: "5432"
+    DENG_DB_NAME: ${DENG_DB_NAME}
+    DENG_DB_USER: ${DENG_DB_USER}
+    DENG_DB_PASSWORD: ${DENG_DB_PASSWORD}
+    DENG_LANDING_DIR: /opt/airflow/landing
+    PYTHONPATH: /opt/airflow
+    # Airflow's own settings (metadata lives in a separate "airflow" database)
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:${AIRFLOW_DB_PASSWORD}@postgres:5432/airflow
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__CORE__LOAD_EXAMPLES: "False"
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "False"
+    AIRFLOW__WEBSERVER__EXPOSE_CONFIG: "False"
+  volumes:
+    - ./dags:/opt/airflow/dags:ro
+    - ./pipeline:/opt/airflow/pipeline:ro
+    - ./sql:/opt/airflow/sql:ro
+    - landing:/opt/airflow/landing
+  networks: [deng]
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${DENG_DB_USER}
+      POSTGRES_PASSWORD: ${DENG_DB_PASSWORD}
+      POSTGRES_DB: ${DENG_DB_NAME}
+      AIRFLOW_DB_PASSWORD: ${AIRFLOW_DB_PASSWORD}
+    ports:
+      - "${POSTGRES_HOST_PORT:-5432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./initdb:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DENG_DB_USER} -d ${DENG_DB_NAME}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    networks: [deng]
+
+  # One-shot setup: prepares the landing volume, migrates Airflow's metadata DB and
+  # creates the web UI user. Exits when done; `airflow` starts afterwards.
+  airflow-init:
+    <<: *airflow-common
+    user: "0:0"
+    environment:
+      <<: *airflow-env
+      _AIRFLOW_DB_MIGRATE: "true"
+      _AIRFLOW_WWW_USER_CREATE: "true"
+      _AIRFLOW_WWW_USER_USERNAME: ${AIRFLOW_ADMIN_USER}
+      _AIRFLOW_WWW_USER_PASSWORD: ${AIRFLOW_ADMIN_PASSWORD}
+    entrypoint: /bin/bash
+    command: ["-c", "chown -R 50000:0 /opt/airflow/landing && exec /entrypoint airflow version"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  # Scheduler + web UI + triggerer in one container (`airflow standalone`).
+  airflow:
+    <<: *airflow-common
+    command: standalone
+    ports:
+      - "${AIRFLOW_HOST_PORT:-8080}:8080"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fs http://localhost:8080/health || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 20
+      start_period: 60s
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+
+volumes:
+  pgdata:
+  landing:
+
+networks:
+  deng:
