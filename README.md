@@ -3,7 +3,7 @@
 End-to-end batch data pipeline over the released Epstein flight logs (1995–2015).
 Team: **Aleksandrs Unterkirhers** & **Johan Yong-Bin Roth** · Data Engineering, HSLU, HS26
 
-> **Status: Midterm (Architecture v0.2) — in review.** Fully local pipeline: Airflow + PostgreSQL in Docker Compose.
+> **Status: Midterm (Architecture v0.2)** Fully local pipeline: Airflow + PostgreSQL in Docker Compose.
 > Cloud (Terraform → GCS + BigQuery) follows for the final.
 
 ---
@@ -18,7 +18,7 @@ Team: **Aleksandrs Unterkirhers** & **Johan Yong-Bin Roth** · Data Engineering,
 | **Today** | The records exist as PDFs and one-off spreadsheets: not queryable, not joined, not reproducible |
 
 Descriptive analytics only. **Appearing in a flight log is not evidence of wrongdoing.** We make no
-inferences about individuals; unnamed passengers stay anonymous.
+inferences about individuals, unnamed passengers stay anonymous.
 
 ## 2. Data sources
 
@@ -53,11 +53,11 @@ inferences about individuals; unnamed passengers stay anonymous.
 | v0.1 (pitch) | v0.2 (implemented) | Why |
 |---|---|---|
 | "2 services" | 3 services: `postgres`, `airflow-init` (one-shot), `airflow` | The landing volume must be writable by the Airflow user and Airflow's metadata DB must be migrated before the scheduler starts. A one-shot init container is the standard Airflow pattern for this. |
-| Airflow stores metadata "in the same Postgres" | Same Postgres **instance**, separate **database** `airflow` | Keeps Airflow's ~50 internal tables out of our warehouse; one container less than a second Postgres. |
+| Airflow stores metadata "in the same Postgres" | Same Postgres **instance**, separate **database** `airflow` | Keeps Airflow's ~50 internal tables out of our warehouse, one container less than a second Postgres. |
 | Downloads not specified | Landing zone `landing/<source>/<run_date>/` (Docker volume) | Every run keeps the exact file it loaded → traceable, and backfills for a past date don't overwrite other runs. |
-| Hash check "skip when unchanged" | Implemented via `raw.load_log` (SHA-256 per load) | Visible proof of idempotency; the log also documents every load. |
-| Airport join on IATA code | Lookup over IATA / ICAO / ident / GPS / FAA local codes + manual alias table | Profiling showed the logs mix code systems; IATA alone matched far too few rows. |
-| `dim_person` | `dim_passenger` with key 0 = unknown | Name renamed for clarity; missing names need their own member so the fact table has no NULL keys. |
+| Hash check "skip when unchanged" | Implemented via `raw.load_log` (SHA-256 per load) | Visible proof of idempotency, the log also documents every load. |
+| Airport join on IATA code | Lookup over IATA / ICAO / ident / GPS / FAA local codes + manual alias table | Profiling showed the logs mix code systems, IATA alone matched far too few rows. |
+| `dim_person` | `dim_passenger` with key 0 = unknown | Name renamed for clarity, missing names need their own member so the fact table has no NULL keys. |
 | `dim_aircraft` keyed by tail number | keyed by tail number + model | The same tail number was used for different aircraft. |
 
 ## 4. Repository structure
@@ -164,8 +164,8 @@ In the UI, any single task can be rerun with *Clear*; downstream tasks rerun aut
 ## 7. Design decisions
 
 ### Ingestion: full load, weekly, fail loud
-- **Full instead of incremental load.** `flights.json` is a closed historic dataset — there are no new rows to pick up incrementally. `airports.csv` has no reliable "last changed" field. Both files are small (seconds to load), so a full reload is the simplest correct option.
-- **Weekly schedule.** The flight logs never change; the airport reference changes rarely (code renames). Weekly keeps the reference fresh at negligible cost. A daily schedule would only produce "skipped_unchanged" entries.
+- **Full instead of incremental load.** `flights.json` is a closed historic dataset: there are no new rows to pick up incrementally. `airports.csv` has no reliable "last changed" field. Both files are small (seconds to load), so a full reload is the simplest correct option.
+- **Weekly schedule.** The flight logs never change, the airport reference changes rarely (code renames). Weekly keeps the reference fresh at negligible cost. A daily schedule would only produce "skipped_unchanged" entries.
 - **Idempotent.** Each raw load runs `DROP/CREATE + COPY + log entry` in **one transaction**: either the new data is fully there, or the old data is untouched. If the file's SHA-256 equals the last successful load, the reload is skipped. Staging and mart tables are rebuilt from scratch in one transaction per layer. Running the DAG twice gives the same result.
 - **Failure behaviour.**
   - Network/HTTP errors → task fails → **3 retries with exponential back-off**.
@@ -173,20 +173,20 @@ In the UI, any single task can be rerun with *Clear*; downstream tasks rerun aut
   - **Validation before loading:** required columns present, row count within expected range (flights 4,500–6,000; airports 70,000–150,000). A truncated or changed file fails here and never replaces good data.
   - `quality_checks` has **no retries**: a failed check is a data problem, not a transient error.
   - `max_active_runs=1`, because all runs rebuild the same tables.
-- **Backfills.** `catchup=False`, so starting the stack does not create dozens of past runs. Past intervals can be run explicitly with `airflow dags backfill`; each run stores its download under its own run date. *Limitation:* the sources only offer their current version, so a backfill re-loads today's file — it does not recreate historic snapshots.
+- **Backfills.** `catchup=False`, so starting the stack does not create dozens of past runs. Past intervals can be run explicitly with `airflow dags backfill`, each run stores its download under its own run date. *Limitation:* the sources only offer their current version, so a backfill re-loads today's file: it does not recreate historic snapshots.
 
 ### Storage layers (PostgreSQL schemas)
 | Layer | Content | Why |
 |---|---|---|
 | `landing` (volume) | downloaded files per run date | exact input of each run, re-loadable without network |
-| `raw` | source 1:1, all columns `TEXT`, + `_run_id`, `_loaded_at`; `load_log` | a bad value can never break the load; typing happens later |
+| `raw` | source 1:1, all columns `TEXT`, + `_run_id`, `_loaded_at`, `load_log` | a bad value can never break the load, typing happens later |
 | `staging` | typed, cleaned, airports resolved | one place for all cleaning rules |
 | `mart` | star schema + aggregate | what users query |
 
 ### Transformations (and how they support the use case)
 | Transformation | Where | Supports |
 |---|---|---|
-| Normalise codes (trim, upper), resolve to reference airport via IATA/ICAO/FAA/alias | `staging/03`, `staging/04` | routes need readable names, countries and coordinates; without the PBI alias 26 % of code references would be lost |
+| Normalise codes (trim, upper), resolve to reference airport via IATA/ICAO/FAA/alias | `staging/03`, `staging/04` | routes need readable names, countries and coordinates, without the PBI alias 26 % of code references would be lost |
 | Type columns (date, int, boolean), placeholder names → NULL | `staging/04` | correct time-based analysis and counts |
 | `leg_key` = hash(date, aircraft, route, flight no.) | `staging/04` | "number of flights" (1,491) instead of passenger rows (5,001) |
 | Great-circle distance per leg | `mart/05` | distance flown per route/aircraft/period |
@@ -224,5 +224,5 @@ every row has an aircraft · aggregate sums match the fact table.
 | Week | Milestone | Status |
 |---|---|---|
 | W3 | Pitch: README, use case, Architecture v0.1 | ✅ |
-| W6/7 | Local pipeline: ingestion → Postgres, Airflow, Docker Compose, transformations — Architecture v0.2 | 🔄 in review |
+| W6/7 | Local pipeline: ingestion → Postgres, Airflow, Docker Compose, transformations — Architecture v0.2 | ✅ |
 | W13/14 | Terraform (GCS bucket + BigQuery dataset), cloud ingestion, BigQuery models with partitioning/clustering, final architecture | ⏳ |
